@@ -1,0 +1,449 @@
+#!/usr/bin/perl
+# vim: sw=4
+#
+# Command line interface to giromilano.atm.it.
+
+##############################################################################
+package ATM::Types;
+
+use warnings;
+use strict;
+
+use Type::Library -base;
+use Type::Utils -all;
+
+declare 'StopNumber',
+	where { /^-?\d+$/ },
+	message { "$_ is not a valid stop number!" };
+
+declare 'LineName',
+	where { /^(?:LIN|MXP|(?:|-|Z|S|N|NM)\d+)$/ },
+	message { "$_ is not a valid line name!" };
+
+enum 'LineDirection', [qw(0 1)];
+
+##############################################################################
+package ATM::Common;
+
+use Carp qw(confess);
+use LWP::UserAgent;
+use LWP::ConnCache;
+use File::stat;
+use Storable;
+use JSON;
+use Moo;
+use namespace::clean;
+
+has url => (
+	is => 'lazy',
+);
+
+sub _build_url { confess "Must be subclassed!" }
+
+has cache_ttl => (
+	is => 'rw',
+	default => 60 * 60 * 24 * 30,	# 1 month
+);
+
+has cache_dir => (
+	is => 'ro',
+	default => $ENV{HOME} . '/.cache/atm',
+);
+
+has cache_file => (
+	is => 'lazy',
+);
+
+# no caching by default
+sub _build_cache_file { undef }
+
+has useragent => (
+	is => 'rw',
+	lazy => 1,
+	isa => sub { confess if not $_[0]->isa('LWP::UserAgent') },
+	builder => '_build_useragent',
+);
+
+sub _build_useragent {
+	my ($self) = @_;
+
+	my $ua = LWP::UserAgent->new(
+		timeout		=> 5,
+		conn_cache	=> LWP::ConnCache->new,
+	);
+
+	# for debugging
+	if (0) {
+		#$ua->show_progress(1);
+		$ua->add_handler("request_send",  sub { shift->dump; return });
+		$ua->add_handler("response_done", sub { shift->dump; return });
+	}
+
+	return $ua;
+}
+
+has data => (
+	is => 'lazy',
+);
+
+sub _build_data {
+	return $_[0]->_get_json_data_cached;
+}
+
+sub _get_json_data_cached {
+	my ($self) = @_;
+
+	my $file = $self->cache_dir . '/' . $self->cache_file;
+
+	if ($self->cache_file and $self->cache_ttl) {
+		my $st = stat($file);
+		return retrieve($file) if $st and time - $st->mtime < $self->cache_ttl;
+	}
+
+	mkdir $self->cache_dir if not -d $self->cache_dir;
+
+	my $data = $self->_get_json_data;
+	store($data, $file) if $self->cache_file;
+	return $data;
+}
+
+sub _get_json_data {
+	my ($self) = @_;
+
+	my $response = $self->useragent->get($self->url);
+	confess if not $response;
+	return decode_json($response->decoded_content) if $response->is_success;
+
+	die $response->status_line . ' for ' . $self->url . "\n";
+}
+
+##############################################################################
+package ATM::LinesList;
+
+use Term::ANSIColor;
+use Moo;
+extends 'ATM::Common';
+use namespace::clean;
+
+sub _build_url {
+	return 'http://giromilano.atm.it/TPPortalBackEnd/tpl/journeyPatterns';
+}
+
+sub _build_cache_file {
+	return 'lineslist.storable';
+}
+
+##############################################################################
+sub print {
+	my ($self) = @_;
+
+	foreach my $line (@{ $self->data->{JourneyPatterns} }) {
+		printf("%s%-5s %s%s %s\n",
+			color('bold black'),
+			$line->{Code},
+			$line->{Direction},
+			color('reset'),
+			$line->{Line}->{LineDescription} || '',
+		);
+	}
+}
+
+##############################################################################
+package ATM::Line;
+
+use Term::ANSIColor;
+use Moo;
+extends 'ATM::Common';
+import ATM::Types qw(:all);
+use namespace::clean;
+
+has line => (
+	is => 'ro',
+	isa => &LineName,
+);
+
+has direction => (
+	is => 'ro',
+	default => 0,
+	isa => &LineDirection,
+);
+
+sub _build_url {
+	my ($self) = @_;
+
+	return 'http://giromilano.atm.it/TPPortalBackEnd/tpl/journeyPatterns/'
+		. $self->line . '|' . $self->direction . '/stops';
+}
+
+sub _build_cache_file {
+	my ($self) = @_;
+
+	return 'line-' . $self->line . '-' . $self->direction . '.storable';
+}
+
+##############################################################################
+sub print {
+	my ($self) = @_;
+
+	printf("%sLinea %s (%s)%s\n",
+		color('yellow'), # this tends to be more like orange
+		$self->data->{Line}->{LineDescription}, $self->data->{Code},
+		color('reset'),
+	);
+
+	foreach my $stop (@{ $self->data->{Stops} }) {
+		printf("%s%-5s%s %s\n",
+			color('bold black'),
+			$stop->{Code},
+			color('reset'),
+			$stop->{Description} || '',
+		);
+	}
+}
+
+##############################################################################
+package ATM::Stop;
+
+use Term::ANSIColor;
+use Moo;
+extends 'ATM::Common';
+import ATM::Types qw(:all);
+use namespace::clean;
+
+has stop => (
+	is => 'ro',
+	isa => &StopNumber,
+);
+
+has '+cache_ttl' => (
+	default => 10,
+);
+
+sub _build_url {
+	my ($self) = @_;
+
+	return 'http://giromilano.atm.it/TPPortalBackEnd/geodata/pois/stops/'
+		. $self->stop;
+}
+
+sub _build_cache_file {
+	my ($self) = @_;
+
+	return 'stop-' . $self->stop . '.storable';
+}
+
+##############################################################################
+sub print {
+	my ($self) = @_;
+
+	printf("%sFermata %s (%s)%s\n",
+		color('yellow'),
+		$self->data->{Description}, $self->data->{CustomerCode},
+		color('reset'),
+	);
+
+	foreach my $line (@{ $self->data->{Lines} }) {
+		printf("%s%-3s %-15s %s%s\n",
+			_wait_color($line->{WaitMessage}),
+			$line->{Line}->{LineCode},
+			$line->{WaitMessage} || '',
+			$line->{Line}->{LineDescription},
+			color('reset'),
+		);
+	}
+}
+
+sub _wait_color {
+	local $_ = $_[0];
+
+	if    (not $_)			{ return color('bold black') } # grey
+	elsif (/^\s*(\d+) min$/){ return $1 <= 12 ? color('bright_green') : '' }
+	elsif (/^sup30 min$/)	{ return color('bright_red') }
+	# arrival in less than 2 minutes
+	elsif (/^in arrivo$/)	{ return color('bright_green') }
+	# probably has just departed
+	#elsif (/^ricalcolo$/)	{ return color('bright_yellow') }
+	# stuck somewhere, no relation to actual distance
+	elsif (/^in coda$/)		{ return color('bright_yellow') }
+	elsif (/^no serv\.$/)	{ return color('bold black') }
+	return '';
+}
+
+##############################################################################
+sub line {
+	my ($self, $line) = @_;
+
+	return grep { $_->{Line}->{LineCode} eq $line } @{ $self->data->{Lines} };
+}
+
+sub lines {
+	return map { $_->{Line}->{LineCode} } @{ $_[0]->data->{Lines} };
+}
+
+##############################################################################
+package ATM::TimeTable;
+
+use Term::ANSIColor;
+use Moo;
+extends 'ATM::Common';
+import ATM::Types qw(:all);
+use namespace::clean;
+
+has stop => (
+	is => 'ro',
+	isa => &StopNumber,
+);
+
+has line => (
+	is => 'ro',
+	isa => &LineName,
+);
+
+has direction => (
+	is => 'ro',
+	default => 0,
+	isa => &LineDirection,
+);
+
+sub _build_url {
+	my ($self) = @_;
+
+	return 'http://giromilano.atm.it/TPPortalBackEnd/tpl'
+		. '/stops/' . $self->stop
+		. '/timetable/line/' . $self->line
+		. '/dir/' . $self->direction;
+}
+
+sub _build_cache_file {
+	my ($self) = @_;
+
+	return 'timetable-' . join('-', $self->stop, $self->line,
+		$self->direction) . '.storable';
+}
+
+##############################################################################
+sub print {
+	my ($self) = @_;
+
+	printf("%sLinea %s - Fermata %s (dir %s)%s\n",
+		color('yellow'),
+		$self->data->{LineCode},
+		$self->data->{StopCode}, $self->data->{Direction},
+		color('reset'),
+	);
+
+	foreach my $ts (@{ $self->data->{TimeSchedules} }) {
+		print $ts->{DayType}->{DayTypeDescription} . "\n";
+		foreach my $day_ts (@{ $ts->{Schedule} }) {
+			printf("%-2s   %-25s  %s%s%s\n",
+				$day_ts->{Hour}, $day_ts->{ScheduleDetail},
+				color('blue'), $day_ts->{NightDetail}, color('reset'),
+			);
+		}
+		print "\n";
+	}
+}
+
+##############################################################################
+package main;
+
+use warnings;
+use strict;
+use open ':locale';
+
+use ATM::Stop;
+use Getopt::Long;
+
+{
+	my ($opt_lines_list, $opt_line, $opt_direction, @opt_stops, $opt_timetable);
+
+	Getopt::Long::Configure(qw(gnu_getopt));
+	my $result = GetOptions(
+		'lines|linee'			=> \$opt_lines_list,
+		'line|linea=s'			=> \$opt_line,
+		'direction|direzione=s'	=> \$opt_direction,
+		'stop|fermata=s'		=> \@opt_stops,
+		'timetable|orario=s'	=> \$opt_timetable,
+	) or exit 255;
+
+	if (not $ARGV[0]) {
+	} elsif ($ARGV[0] =~ /^-?\d+/) {
+		if ($ARGV[0] < 0) {				# subway stop
+			@opt_stops = ($ARGV[0]);
+		} elsif ($ARGV[0] < 1000) {		# line number
+			$opt_line = $ARGV[0];
+		} else {						# surface line stop
+			@opt_stops = ($ARGV[0]);
+		}
+	} else {
+		die "Usage: $0 ...\n";
+	}
+
+	if ($opt_lines_list) {
+		my $lines = ATM::LinesList->new;
+		$lines->print;
+		exit;
+	}
+
+	if ($opt_line) {
+		my $line = ATM::Line->new({
+			line		=> $opt_line,
+			direction	=> ($opt_direction || 0),
+		});
+		$line->print;
+		exit;
+	}
+
+	if ($opt_timetable) {
+		die "--stop is missing!\n" if not @opt_stops;
+		die "Timetables are not available for trains and subways!\n"
+			if $opt_stops[0] < 0 or $opt_stops[0] > 100000;
+
+		my $lines = ATM::TimeTable->new({
+			line		=> $opt_timetable,
+			direction	=> ($opt_direction || 0),
+			stop		=> $opt_stops[0],
+		});
+		$lines->print;
+		exit;
+	}
+
+	@opt_stops = local_stops() if not @opt_stops;
+	die "Cannot guess the local stops!\n" if not @opt_stops;
+
+	my $shared_useragent;
+	foreach my $num (@opt_stops) {
+		die "Timetables are not available for trains and subways!\n"
+			if $num < 0 or $num > 100000;
+
+		my $stop = ATM::Stop->new({ stop => $num });
+		# reuse a cached HTTP connection
+		$stop->useragent($shared_useragent) if $shared_useragent;
+		$stop->print;
+		$shared_useragent ||= $stop->useragent;
+		print "\n";
+	}
+
+	exit;
+}
+
+# geolocate the user and return a list of stops nearby
+sub local_stops {
+	# embedded configuration data which should be filled in by the user
+	my $stops_list = {
+		'192.0.2.1'			=> [qw(10549 10550)],
+	   	'10.0.0.1'			=> [qw(10076)],
+	};
+
+	return if not %$stops_list;
+	my $ip = default_route();
+	return @{ $stops_list->{$ip} } if $ip and $stops_list->{$ip};
+	return ();
+}
+
+sub default_route {
+	my $out = `ip route show default`;
+	my ($route) = $out =~ /^default via (\S+) /m;
+	return $route;
+}
+
