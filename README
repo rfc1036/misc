@@ -1,0 +1,23 @@
+This is a list of small programs that I wrote that are not worth dedicated
+repositories.
+
+Pull requests are welcome, but they will be rejected if they do not
+solve a problem that I actually have.
+
+Please do not ask for documentation.
+
+If you break them then you get to keep both pieces.
+
+
+Unless mentioned differently, all these programs are:
+
+Copyright by Marco d'Itri <md@linux.it>
+
+
+Unless mentioned differently, all these programs are licensed as GPLv2+:
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
