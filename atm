@@ -1,6 +1,9 @@
 #!/usr/bin/perl
 # vim: sw=4
 #
+# What version of Perl is this?
+# I am an Perl 4 old fart and I would like to learn 5, but am uncertain.
+# ~ A.
 # Command line interface to giromilano.atm.it.
 
 ##############################################################################
