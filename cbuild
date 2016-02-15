@@ -1,0 +1,165 @@
+#!/bin/sh -e
+#
+# Copyright 2016 Marco d'Itri <md@linux.it>
+#
+# This program manages containers using overlayfs.
+#
+# If the base chroot is "/" then it will create an overlay of the root
+# file system.
+#
+# If no overlay is specified on the command line then it will create an
+# ephemeral one in a tmpfs.
+#
+# Multiple layers of overlays can be specified, separating them with ":'.
+#
+#
+# Did you create an ephemeral overlay but later decided that you want to
+# keep the changes? No big deal, you can just rsync a copy of $upper_dir
+# to $base_storage/something/.
+#
+# If you share /var/cache/apt/archives/ with the host then you will be
+# able to reinstall over and over the same packages in new overlays
+# without having to download them every time.
+
+# Storage for the chroots and their overlays.
+base_storage='/USR3/chroot/base'
+delta_storage='/USR3/chroot/delta'
+
+# host directories that will be bind-mounted in the container
+bind_dirs='/var/cache/apt/archives/ /home/ /USR3/src/ /USR3/.tmp/ccache/'
+
+# If this file is present in the delta tree then it must not be older than
+# the one in the base tree.
+timestamp_file='/var/lib/dpkg/status'
+
+##############################################################################
+tmp_cleanup() {
+  set +e
+  if mountpoint -q $merged_dir; then
+    umount -l $merged_dir
+  fi
+  [ -d $merged_dir ] && rmdir $merged_dir
+  if mountpoint -q $delta_storage; then
+    umount -l $delta_storage
+    rmdir $delta_storage
+  fi
+  [ -d $work_dir/work/ ] && rmdir $work_dir/work/
+  [ -d $work_dir ] && rmdir $work_dir
+  return 0
+}
+
+overlayfs_source_paths() {
+  local names="$1"
+
+  local last_name="${names##*:}"
+  names="${names%:*}"
+
+  local oifs="$IFS"
+  IFS=':'
+  local x
+  for x in $names; do
+    echo -n "$delta_storage/$x:"
+  done
+  IFS="$oifs"
+
+  echo -n "$base_storage/$last_name"
+}
+
+##############################################################################
+if [ -z "$1" ]; then
+  echo "Usage: $0 BASE [DELTA]\n" >&2
+  echo "Available base chroots:\n" >&2
+  printf "%-40s%s\n" NAME UPDATED
+  for dir in $base_storage/*/; do
+    stamp_date=$(stat --format="%y" $dir$timestamp_file)
+    printf "%-40s%s\n" "$(basename $dir)" "$stamp_date"
+  done >&2
+  echo "\nAvailable deltas:\n\nNAME" >&2
+  for dir in $delta_storage/*/; do
+    echo $(basename $dir)
+  done >&2
+  exit 1
+fi
+
+if [ "$USER" != 'root' ]; then
+  exec sudo $0 "$@"
+fi
+
+base_name="$1"
+delta_name="$2"
+
+case "$base_name" in
+  /)
+    source_dir='/'
+    base_name='HOST'
+    machine_name='hostcow'
+    ;;
+  *:*)
+    source_dir="$(overlayfs_source_paths $base_name)"
+    ;;
+  *)
+    source_dir="$base_storage/$base_name"
+    if [ ! -e $source_dir/bin/sh ]; then
+      echo "$source_dir is not an OS tree!" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+##############################################################################
+trap "tmp_cleanup" 0 1 2 3 15
+
+# use ephemeral storage if no delta is provided on the command line
+if [ -z "$delta_name" ]; then
+  delta_name="TMP$$"
+  delta_storage=$(mktemp --directory --tmpdir delta.XXX)
+  mount -t tmpfs tmpfs $delta_storage -o mode=755
+fi
+
+[ "$machine_name" ] || machine_name="$delta_name"
+
+# overlay
+upper_dir="$delta_storage/$base_name.$delta_name"
+# private temporary directory
+work_dir="$delta_storage/.work.$base_name.$delta_name"
+# the mount point for the overlayfs
+merged_dir="$base_storage/$base_name.$delta_name"
+
+echo "
+source_dir: $source_dir
+upper_dir:  $upper_dir
+merged_dir: $merged_dir
+"
+
+# only check the top source dir
+top_source_dir="${source_dir%%:*}"
+
+# check if the base chroot has been updated after the delta was created
+if [ -z "$timestamp_file" ]; then
+  :
+elif [ ! -e "$top_source_dir$timestamp_file" ]; then
+  echo "WARNING: $top_source_dir$timestamp_file does not exist." >&2
+elif [ ! -e "$upper_dir$timestamp_file" ]; then
+  :
+elif [ "$top_source_dir$timestamp_file" -nt "$upper_dir$timestamp_file" ]; then
+  echo "Invalid overlay directory!" >&2
+  echo "$timestamp_file is newer in $top_source_dir." >&2
+  exit 1
+fi
+
+for dir in $upper_dir $work_dir $merged_dir; do
+  [ -d $dir ] || mkdir $dir
+done
+
+mount -t overlay overlay $merged_dir \
+  -o lowerdir=$source_dir,upperdir=$upper_dir,workdir=$work_dir
+
+##############################################################################
+bind_dirs_options=$(for dir in $bind_dirs; do echo --bind=$dir; done)
+
+systemd-nspawn \
+  --tmpfs=/tmp/:mode=1777 \
+  $bind_dirs_options \
+  --machine=$machine_name \
+  --directory=$merged_dir || true
+

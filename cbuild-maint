@@ -1,0 +1,26 @@
+#!/bin/sh -e
+
+if [ -z "$1" ]; then
+  echo "Usage: $0 BASE" >&2
+  exit 1
+fi
+
+if [ "$USER" != 'root' ]; then
+  exec sudo $0 "$@"
+fi
+
+base_name="$1"
+
+source_dir="/USR3/chroot/base/$base_name"
+if [ ! -e $source_dir/bin/sh ]; then
+  echo "$source_dir is not an OS tree!" >&2
+  exit 1
+fi
+
+##############################################################################
+systemd-nspawn \
+  --tmpfs=/tmp/:mode=1777 \
+  --bind=/var/cache/apt/archives/ \
+  --register=no \
+  --directory=$source_dir || true
+
