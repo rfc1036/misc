@@ -1,0 +1,34 @@
+#!/usr/bin/perl
+# http://www2.arpalombardia.it/siti/arpalombardia/meteo/richiesta-dati-misurati/Pagine/RichiestaDatiMisurati.aspx
+
+use warnings;
+use strict;
+use autodie;
+
+use File::Slurp;
+use DateTime::Format::Strptime;
+
+{
+#	my @lines = read_file('RW_20151215035306_49457_5903.csv');
+	open(my $fh, 'zcat RW_*_*.zip |');
+	my @lines = <$fh>;
+	chomp @lines;
+	shift @lines;
+
+	my $dtp = DateTime::Format::Strptime->new(
+		pattern	=> '%Y/%m/%d %H:%M',
+		locale	=> 'it_IT',
+		time_zone => 'Europe/Rome',
+		on_error  => 'croak',
+	);
+
+	my @temp =
+		map { [ $dtp->parse_datetime($_->[0])->epoch => $_->[1] ] }
+		grep { $_->[1] > -20 }
+		map { [ (split(/,/))[1,2] ] }
+		@lines;
+
+	my $out = join('', map { "$_->[0] $_->[1]\n" } @temp);
+	write_file('arpa-temp.data', \$out);
+}
+

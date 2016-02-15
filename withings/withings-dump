@@ -1,0 +1,181 @@
+#!/usr/bin/perl
+#
+# This program will download from https://healthmate.withings.com/ the
+# temperature data logged by a Withings Smart Body Analyzer.
+#
+# Search for "MODIFY HERE" to find out where your account data is configured.
+#
+# Inspired by http://counterinception.com/content/extracting-your-data-withings-smart-body-analyzer-ws-50 .
+
+use warnings;
+use strict;
+use autodie;
+use v5.16;
+use open IO => ':encoding(utf8)';
+use open ':std';
+
+use Getopt::Long;
+use DateTime::Format::Natural;
+use LWP::UserAgent;
+use LWP::ConnCache;
+use JSON;
+use File::Slurp;
+use Template;
+
+my $Verbose = 1 if -t 1;
+
+{
+	my ($start_date, $end_date, $external_temp, $outfile, $no_download);
+
+	Getopt::Long::Configure(qw(bundling));
+	GetOptions(
+		'start=s'		=> \$start_date,
+		'end=s'			=> \$end_date,
+		'outfile=s'		=> \$outfile,
+		'external=s'	=> \$external_temp,
+		'no-download'	=> \$no_download,
+	) or exit 255;
+
+	my ($start_time, $end_time);
+	$start_time = date_to_epoch($start_date) if $start_date;
+	$end_time   = date_to_epoch($end_date)   if $end_date;
+	$start_time ||= '6 months ago';
+	$end_time ||= time;
+
+	if (not $no_download) {
+		my $json = withings_get_json({
+			startdate	=> $start_time,
+			enddate		=> $end_time,
+
+			# MODIFY HERE
+			account_email	=> 'user@example.com',
+			account_password=> 'your-password',
+			# the ID of your device: leave it blank if you do not know it yet
+			device_id	=> '',
+		});
+
+		my @temp =
+			sort { $a->[0] <=> $b->[0] }
+			map { [ $_->{date}, $_->{value} ] }
+			map { @{ $_->{data} } }
+			grep { $_->{type} == 12 }
+			@{ $json->{body}->{series} };
+
+		my $out = join('', map { "$_->[0] $_->[1]\n" } @temp);
+		write_file('withings-air.data', \$out);
+	}
+
+	plot('withings-temp.gnuplot', {
+		data		=> 'withings-air.data',
+		data2		=> $external_temp,
+		start_time	=> $start_time,
+		end_time	=> $end_time,
+		outfile		=> $outfile,
+	});
+}
+
+##############################################################################
+sub plot {
+	my ($gnuplot, $vars) = @_;
+
+	my $template = Template->new(
+		POST_CHOMP => 1,
+		DEBUG_UNDEF => 1,
+		ENCODING => 'utf8',
+	) or die "Template->new: $Template::ERROR";
+
+	my $output;
+	$template->process($gnuplot, $vars, \$output)
+		or die $template->error;
+
+	open(my $fh, '|-', 'gnuplot');
+	print $fh $output;
+	close $fh;
+}
+
+##############################################################################
+sub withings_get_json {
+	my ($p) = @_;
+
+	$p->{startdate} ||= 0;
+	$p->{enddate} ||= time;
+
+	my $ua = LWP::UserAgent->new(
+		timeout		=> 15,
+		conn_cache	=> LWP::ConnCache->new,
+		cookie_jar	=> {
+			# file => 'withings-cookies.txt', autosave => 1,
+		},
+	);
+	$ua->show_progress(1) if $Verbose;
+
+	my $res = $ua->post('https://account.withings.com/connectionuser/account_login', [
+		email	=> $p->{account_email},
+		password=> $p->{account_password},
+	]);
+
+	my $session_key;
+	$ua->cookie_jar->scan(sub {
+		$session_key = $_[2] if $_[1] eq 'session_key';
+	});
+	die if not $session_key;
+
+	if (not $p->{device_id}) {
+		my $json = $ua->healthmate_web_api('/association', [
+			sessionid	=> $session_key,
+			action		=> 'getbyaccountid',
+		]);
+
+		print "Known devices:\n";
+		print "ID: $_->{deviceid}, name $_->{devicename}.\n"
+			foreach @{ $json->{body}->{associations} };
+
+		exit;
+	}
+
+	return $ua->healthmate_web_api('/v2/measure', [
+		sessionid	=> $session_key,
+		deviceid	=> $p->{device_id},
+		startdate	=> $p->{startdate},
+		enddate		=> $p->{enddate},
+		action		=> 'getmeashf',
+		meastype	=> 12,				# temperature: 12, CO2: 35
+	]);
+}
+
+##############################################################################
+sub LWP::UserAgent::healthmate_web_api {
+	my ($self, $api, $params) = @_;
+
+	my $res = $self->post('https://healthmate.withings.com/index/service'
+		. $api, $params);
+
+	die "Request for $api failed: " . $res->status_line . "\n"
+		if $res->is_error;
+
+	my $json = decode_json($res->decoded_content);
+
+	# the returned Content-Type is unreliable
+	die "The $api request has not returned a JSON object:\n\n"
+		. $res->decoded_content . "\n"
+			if not $json or (ref $json eq 'ARRAY' and not @$json);
+	die "The $api request has returned an error:\n"
+		. $json->{error} . "\n"
+			if $json->{status} and $json->{status} != 0 and $json->{error};
+	die "The $api request has returned an error:\n"
+		. $res->decoded_content . "\n"
+			if $json->{status} and $json->{status} != 0;
+
+	return $json;
+}
+
+##############################################################################
+sub date_to_epoch {
+	my ($date) = @_;
+
+	my $dtnp = DateTime::Format::Natural->new;
+	my $dt = $dtnp->parse_datetime($date);
+	die $dtnp->error . "\n" if not $dtnp->success;
+	return $dt->epoch;
+}
+

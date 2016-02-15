@@ -1,6 +1,10 @@
 This is a list of small programs that I wrote that are not worth dedicated
 repositories.
 
+- atm: command line interface to giromilano.atm.it.
+- withings/: download and graph the temperature data logged by a
+  Withings Smart Body Analyzer.
+
 Pull requests are welcome, but they will be rejected if they do not
 solve a problem that I actually have.
 
