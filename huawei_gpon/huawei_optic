@@ -1,0 +1,91 @@
+#!/usr/bin/perl
+# vim: shiftwidth=4 tabstop=4
+#
+# This program connects to a Huawei GPON CPE like e.g. the HG8010, HG8010H,
+# HG8245, HG8247H and others, gets the digital optical monitoring parameters
+# and logs them to a file.
+#
+# Copyright (C) 2017 Marco d'Itri <md@linux.it>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 2 of the License, or
+# (at your option) any later version.
+
+use warnings;
+use strict;
+use autodie;
+
+{
+	my $file = '/home/md/gpon.dat';
+	my $data = get_huawei_optic();
+	#use DDP; p $data;
+	write_data($file, $data);
+}
+exit;
+
+##############################################################################
+sub write_data {
+	my ($file, $data) = @_;
+
+	open(my $fh, '>>', $file);
+	print $fh join(' ', time,
+		$data->{RxPower}, $data->{TxPower}, $data->{Voltage},
+		$data->{Bias}, $data->{Temperature},
+		) . "\n";
+	close $fh;
+}
+
+sub get_huawei_optic {
+	my ($host, $user, $password) = @_;
+	# Huawei defaults
+	$host ||= '192.168.100.1';
+	$user ||= 'root';
+	$password ||= 'admin';
+
+	my $t = Net::Telnet::Huawei->new(
+		Timeout		=> 5,
+		Prompt		=> '/^WAP>\s*$/m',
+		#Dump_Log	=> 'log_dump',
+		#Input_Log	=> 'log_input',
+	);
+
+	$t->open($host);
+	$t->login($user, $password);
+	my $data = $t->display_optic;
+	$t->quit;
+
+	return $data;
+}
+
+##############################################################################
+package Net::Telnet::Huawei;
+
+use warnings;
+use strict;
+
+use base qw(Net::Telnet);
+
+sub display_optic {
+	my ($self) = @_;
+
+	my @lines = $self->cmd('display optic');
+	s/\s+$//s foreach @lines;
+
+	my %data;
+	foreach (@lines) {
+		next if not /^(\S+)\s*:\s*(.+?)(?: \((\S+)\))?$/;
+		$data{$1} = $2;
+		$data{$1 . '_UNIT'} = $3 if $3;
+	}
+
+	return \%data;
+}
+
+sub quit {
+	my ($self) = @_;
+
+	$self->cmd('quit');
+	return;
+}
+
