@@ -1,0 +1,247 @@
+#!/usr/bin/perl
+# vim: shiftwidth=4 tabstop=4
+#
+# This program connects to the web interface of a ZTE GPON ONT model F601,
+# gets the digital optical monitoring parameters and logs them to a file
+# or to Prometheus' pushgateway.
+#
+# Copyright (C) 2021 Marco d'Itri <md@linux.it>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 2 of the License, or
+# (at your option) any later version.
+
+##############################################################################
+package Md::ZTE_F601;
+
+use v5.20;
+use utf8;
+
+use Moo;
+use HTTP::Tiny;
+use Path::Tiny;
+use Digest::SHA qw(sha256_hex);
+use namespace::clean;
+
+has endpoint => (
+	is => 'rw',
+	default => 'http://192.168.1.1/',
+);
+
+has user => (
+	is => 'rw',
+	default => 'admin',
+);
+
+has password => (
+	is => 'rw',
+	default => 'admin',
+);
+
+has cookie_jar => (
+	is => 'rw',
+	default => sub {
+		file => path('~')->child('.cache')->child('zte_gpon_cookies.txt')
+	},
+);
+
+has _cookie_jar_obj => (
+	is => 'ro',
+	lazy => 1,
+	builder => sub {
+		HTTP::CookieJar::AutoSave->new(file => $_[0]->cookie_jar)
+	},
+);
+
+has http => (
+	is => 'ro',
+	lazy => 1,
+	builder => sub { HTTP::Tiny->new(cookie_jar => $_[0]->_cookie_jar_obj) },
+);
+
+sub login {
+	my ($self) = @_;
+
+	my $response;
+	$response = $self->http->get($self->endpoint);
+	if (not $response->{success}) {
+		die $response->{content} if $response->{status} == 599;
+		die $response->{status} . ' ' . $response->{reason} . "\n"
+			. $response->{content};
+	}
+
+	# extract the CRSF tokens from the HTML
+	my ($token1) = $response->{content} =~ /"Frm_Logintoken","(\d+)"/ms;
+	my ($token2) = $response->{content} =~ /"Frm_Loginchecktoken","([^"]+)"/ms;
+
+	my $nonce = int(rand(89999999) + 10000000);
+	$response = $self->http->post_form($self->endpoint, {
+		action => 'login',
+		Username => $self->user,
+		Password => sha256_hex($self->password . $nonce),
+		UserRandomNum => $nonce,
+		Frm_Logintoken => $token1,
+		Frm_Loginchecktoken => $token2,
+	});
+
+	die $response->{content} if $response->{status} == 599;
+	# the device returns a 302 redirect on successful logins
+	if ($response->{status} != 302) {
+		if ($response->{success}) {
+			my ($errmsg) = $response->{content} =~ /
+				\s
+				}\s+else\s+{ \s+
+				getObj\("errmsg"\)\.innerHTML\s+=\s+"([^"]+)"; \s+
+			/msx;
+			die "$errmsg\n" if $errmsg;
+		}
+		die $response->{status} . ' ' . $response->{reason} . "\n"
+			. $response->{content};
+	}
+
+	return;
+}
+
+sub get_link_info {
+	my ($self) = @_;
+
+	my $response = $self->http->get($self->endpoint
+		. 'getpage.gch?pid=1002&nextpage=pon_status_link_info_t.gch');
+	if (not $response->{success}) {
+		state $restarted = 0;
+		# the device returns 404 when the client is not logged in
+		if ($response->{status} == 404 and not $restarted) {
+			$restarted = 1;
+			$self->login;
+			return $self->get_link_info;
+		}
+		die $response->{content} if $response->{status} == 599;
+		die $response->{status} . ' ' . $response->{reason} . "\n"
+			. $response->{content};
+	}
+
+	my @parser = (
+		[ GPON_State =>	qr/Transfer_meaning\('OperationState','(\d)'\);/ms ],
+		[ RxPower => 	qr/var RxPower = "(-?\d+)";/ms, 10000 ],
+		[ TxPower =>	qr/var TxPower = "(-?\d+)";/ms, 10000 ],
+		[ Voltage =>	qr#id="Frm_Volt"[^>]+>(\d+)</td>#, 1000 ],
+		[ Bias =>		qr#id="Frm_Current"[^>]+>(\d+)</td>#, 1000 ],
+		[ Temperature=>	qr#id="Frm_Temp"[^>]+>(-?\d+)</td># ],
+	);
+
+	# extract the DOM parameters from the HTML
+	my %info;
+	foreach my $x (@parser) {
+		if (my ($value) = $response->{content} =~ $x->[1]) {
+			$value /= $x->[2] if $x->[2];	# scale down
+			$info{ $x->[0] } = $value;
+		}
+	}
+	$self->{info} = \%info;
+
+	return;
+}
+
+sub log_info {
+	my ($self, $file) = @_;
+
+	my $out = join(' ', time,
+		$self->{info}->{RxPower}, $self->{info}->{TxPower},
+		$self->{info}->{Voltage}, $self->{info}->{Bias},
+		$self->{info}->{Temperature},
+	) . "\n";
+	path($file)->append($out);
+	return;
+}
+
+sub openmetrics {
+	my ($self) = @_;
+
+	my $out .= <<END;
+# HELP gpon_dom_rx_power RX power
+# TYPE gpon_dom_rx_power gauge
+gpon_dom_rx_power $self->{info}->{RxPower}
+# HELP gpon_dom_temperature Temperature
+# TYPE gpon_dom_temperature gauge
+gpon_dom_temperature $self->{info}->{Temperature}
+# HELP last_updated_timestamp_seconds Timestamp for the last update
+# TYPE last_updated_timestamp_seconds gauge
+END
+	$out .= 'last_updated_timestamp_seconds=' . time . "\n";
+	return $out;
+}
+
+##############################################################################
+# Extend HTTP::CookieJar to automatically load and store the cookie jar when
+# the object is created or destroyed.
+package HTTP::CookieJar::AutoSave;
+
+use v5.20;
+use utf8;
+use warnings;
+use strict;
+
+use parent 'HTTP::CookieJar';
+use Path::Tiny;
+
+sub new {
+	my $class = shift;
+
+	my $jar = bless({ store => { }, @_ }, $class);
+	if ($jar->{file}) {
+		my $jar_file = path($jar->{file});
+		$jar->load_cookies($jar_file->lines) if $jar_file->exists;
+	}
+	return $jar;
+}
+
+sub DESTROY {
+	my $self = shift;
+
+	return if not $self->{file};
+	my @cookies = $self->dump_cookies;
+	path($self->{file})->spew(join("\n", @cookies) . "\n") if @cookies;
+	return;
+}
+
+##############################################################################
+package main;
+
+use v5.20;
+use utf8;
+use warnings;
+use strict;
+
+use Md::ZTE_F601;
+use Path::Tiny;
+use HTTP::Tiny;
+
+{
+	my $zte = Md::ZTE_F601->new;
+	$zte->get_link_info;
+	if (1) {
+		$zte->log_info(path('~')->child('gpon.dat'));
+	}
+	if (0) {
+		my $m = $zte->openmetrics;
+		pushgateway('http://localhost:9091/metrics/job/zte_gpon/', $m);
+	}
+	exit(0);
+}
+
+sub pushgateway {
+	my ($url, $metrics) = @_;
+
+	my $http = HTTP::Tiny->new;
+	my $response = $http->post($url, {
+		content => $metrics,
+	});
+	if (not $response->{success}) {
+		die $response->{content} if $response->{status} == 599;
+		die $response->{status} . ' ' . $response->{reason} . "\n"
+			. $response->{content};
+	}
+	return;
+}
+
