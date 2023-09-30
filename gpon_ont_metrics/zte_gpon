@@ -158,7 +158,7 @@ sub log_info {
 	my $out = join(' ', time,
 		$self->{info}->{RxPower}, $self->{info}->{TxPower},
 		$self->{info}->{Voltage}, $self->{info}->{Bias},
-		$self->{info}->{Temperature},
+		$self->{info}->{Temperature}, $self->{info}->{GPON_State},
 	) . "\n";
 	path($file)->append($out);
 	return;
@@ -168,6 +168,9 @@ sub openmetrics {
 	my ($self) = @_;
 
 	my $out .= <<END;
+# HELP gpon_state GPON state
+# TYPE gpon_state gauge
+gpon_state $self->{info}->{GPON_State}
 # HELP gpon_dom_rx_power RX power
 # TYPE gpon_dom_rx_power gauge
 gpon_dom_rx_power $self->{info}->{RxPower}
