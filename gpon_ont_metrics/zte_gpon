@@ -18,10 +18,11 @@ package Md::ZTE_F601;
 use v5.20;
 use utf8;
 
-use Moo;
 use HTTP::Tiny;
 use Path::Tiny;
 use Digest::SHA qw(sha256_hex);
+
+use Moo;
 use namespace::clean;
 
 has endpoint => (
@@ -57,7 +58,11 @@ has _cookie_jar_obj => (
 has http => (
 	is => 'ro',
 	lazy => 1,
-	builder => sub { HTTP::Tiny->new(cookie_jar => $_[0]->_cookie_jar_obj) },
+	builder => sub {
+		HTTP::Tiny->new(
+			cookie_jar => $_[0]->_cookie_jar_obj,
+		)
+	},
 );
 
 sub login {
@@ -123,9 +128,9 @@ sub get_link_info {
 
 	my @parser = (
 		[ GPON_State =>	qr/Transfer_meaning\('OperationState','(\d)'\);/ms ],
-		[ RxPower => 	qr/var RxPower = "(-?\d+)";/ms, 10000 ],
-		[ TxPower =>	qr/var TxPower = "(-?\d+)";/ms, 10000 ],
-		[ Voltage =>	qr#id="Frm_Volt"[^>]+>(\d+)</td>#, 1000 ],
+		[ RxPower => 	qr/var RxPower = "(-?\d+)";/ms,		10000 ],
+		[ TxPower =>	qr/var TxPower = "(-?\d+)";/ms,		10000 ],
+		[ Voltage =>	qr#id="Frm_Volt"[^>]+>(\d+)</td>#,	1000 ],
 		[ Bias =>		qr#id="Frm_Current"[^>]+>(\d+)</td>#, 1000 ],
 		[ Temperature=>	qr#id="Frm_Temp"[^>]+>(-?\d+)</td># ],
 	);
@@ -135,6 +140,7 @@ sub get_link_info {
 	foreach my $x (@parser) {
 		if (my ($value) = $response->{content} =~ $x->[1]) {
 			$value /= $x->[2] if $x->[2];	# scale down
+			$value += $x->[3] if $x->[3];	# offset
 			$info{ $x->[0] } = $value;
 		}
 	}
