@@ -90,7 +90,8 @@ sub login {
 		Frm_Loginchecktoken => $token2,
 	});
 
-	die $response->{content} if $response->{status} == 599;
+	die 'Connection failed: ' . $response->{content}
+		if $response->{status} == 599;
 	# the device returns a 302 redirect on successful logins
 	if ($response->{status} != 302) {
 		if ($response->{success}) {
@@ -101,7 +102,8 @@ sub login {
 			/msx;
 			die "$errmsg\n" if $errmsg;
 		}
-		die $response->{status} . ' ' . $response->{reason} . "\n"
+		die 'Login failed: '
+			. $response->{status} . ' ' . $response->{reason} . "\n"
 			. $response->{content};
 	}
 
@@ -121,7 +123,8 @@ sub get_link_info {
 			$self->login;
 			return $self->get_link_info;
 		}
-		die $response->{content} if $response->{status} == 599;
+		die 'Connection failed: ' . $response->{content}
+			if $response->{status} == 599;
 		die $response->{status} . ' ' . $response->{reason} . "\n"
 			. $response->{content};
 	}
@@ -244,7 +247,8 @@ sub pushgateway {
 		content => $metrics,
 	});
 	if (not $response->{success}) {
-		die $response->{content} if $response->{status} == 599;
+		die 'Connection failed: ' . $response->{content}
+			if $response->{status} == 599;
 		die $response->{status} . ' ' . $response->{reason} . "\n"
 			. $response->{content};
 	}
