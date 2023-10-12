@@ -39,7 +39,7 @@ my $Verbose = 1 if -t 1;
 	my ($start_time, $end_time);
 	$start_time = date_to_epoch($start_date) if $start_date;
 	$end_time   = date_to_epoch($end_date)   if $end_date;
-	$start_time ||= '6 months ago';
+	$start_time ||= date_to_epoch('6 months ago');
 	$end_time ||= time;
 
 	if (not $no_download) {
